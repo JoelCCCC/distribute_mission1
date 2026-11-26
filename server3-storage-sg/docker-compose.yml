@@ -1,0 +1,31 @@
+services:
+  sg-mongo:
+    image: mongo:7.0
+    container_name: cdn-server3-mongo
+    restart: unless-stopped
+    ports:
+      - "${MONGO_PORT:-27018}:27017"
+    volumes:
+      - sg-mongo-data:/data/db
+
+  storage-sg:
+    build:
+      context: ..
+      dockerfile: server3-storage-sg/Dockerfile
+    container_name: cdn-server3-storage-sg
+    restart: unless-stopped
+    depends_on:
+      - sg-mongo
+    ports:
+      - "${PORT:-5001}:5001"
+    environment:
+      - NODE_ID=sg-1
+      - REGION=Asia
+      - PORT=5001
+      - MONGO_URI=mongodb://sg-mongo:27017
+      - DB_NAME=cdn_storage_sg
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:5001}
+      - INTERNAL_SECRET=${INTERNAL_SECRET:-cdn-super-secret-key-2026}
+
+volumes:
+  sg-mongo-data:

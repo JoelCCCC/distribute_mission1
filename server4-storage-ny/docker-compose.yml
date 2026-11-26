@@ -1,0 +1,31 @@
+services:
+  ny-mongo:
+    image: mongo:7.0
+    container_name: cdn-server4-mongo
+    restart: unless-stopped
+    ports:
+      - "${MONGO_PORT:-27019}:27017"
+    volumes:
+      - ny-mongo-data:/data/db
+
+  storage-ny:
+    build:
+      context: ..
+      dockerfile: server4-storage-ny/Dockerfile
+    container_name: cdn-server4-storage-ny
+    restart: unless-stopped
+    depends_on:
+      - ny-mongo
+    ports:
+      - "${PORT:-5002}:5002"
+    environment:
+      - NODE_ID=ny-1
+      - REGION=North America
+      - PORT=5002
+      - MONGO_URI=mongodb://ny-mongo:27017
+      - DB_NAME=cdn_storage_ny
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:5002}
+      - INTERNAL_SECRET=${INTERNAL_SECRET:-cdn-super-secret-key-2026}
+
+volumes:
+  ny-mongo-data:

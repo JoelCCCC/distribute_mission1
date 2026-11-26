@@ -1,0 +1,12 @@
+services:
+  webapp:
+    build:
+      context: ..
+      dockerfile: server1-webapp/Dockerfile
+    container_name: cdn-server1-webapp
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - CENTRAL_API_URL=${CENTRAL_API_URL:-http://localhost:4000}

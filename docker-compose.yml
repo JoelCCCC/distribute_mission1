@@ -1,0 +1,178 @@
+services:
+  # ==========================================================
+  # SERVER 1: Web Application Frontend & Geo-Router
+  # ==========================================================
+  server1-webapp:
+    build:
+      context: .
+      dockerfile: server1-webapp/Dockerfile
+    container_name: cdn-server1-webapp
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - CENTRAL_API_URL=http://server2-central-api:4000
+    depends_on:
+      - server2-central-api
+    networks:
+      - cdn-network
+
+  # ==========================================================
+  # SERVER 2: Central API & Replication Orchestrator
+  # ==========================================================
+  central-mongo:
+    image: mongo:7.0
+    container_name: cdn-central-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - central-mongo-data:/data/db
+    networks:
+      - cdn-network
+
+  server2-central-api:
+    build:
+      context: .
+      dockerfile: server2-central-api/Dockerfile
+    container_name: cdn-server2-central-api
+    restart: unless-stopped
+    depends_on:
+      - central-mongo
+      - server3-storage-sg
+      - server4-storage-ny
+      - server5-storage-ldn
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - MONGO_URI=mongodb://central-mongo:27017
+      - DB_NAME=cdn_central
+      - INTERNAL_SECRET=cdn-super-secret-key-2026
+      - PRIMARY_NODE_ID=sg-1
+      # Client-facing public URLs (for browser direct access):
+      - EDGE_SG_URL=http://localhost:5001
+      - EDGE_NY_URL=http://localhost:5002
+      - EDGE_LDN_URL=http://localhost:5003
+      # Container-to-container internal replication URLs:
+      - EDGE_SG_INTERNAL_URL=http://server3-storage-sg:5001
+      - EDGE_NY_INTERNAL_URL=http://server4-storage-ny:5002
+      - EDGE_LDN_INTERNAL_URL=http://server5-storage-ldn:5003
+    networks:
+      - cdn-network
+
+  # ==========================================================
+  # SERVER 3: Edge Storage Node - Singapore (Asia)
+  # ==========================================================
+  sg-mongo:
+    image: mongo:7.0
+    container_name: cdn-sg-mongo
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    volumes:
+      - sg-mongo-data:/data/db
+    networks:
+      - cdn-network
+
+  server3-storage-sg:
+    build:
+      context: .
+      dockerfile: server3-storage-sg/Dockerfile
+    container_name: cdn-server3-storage-sg
+    restart: unless-stopped
+    depends_on:
+      - sg-mongo
+    ports:
+      - "5001:5001"
+    environment:
+      - NODE_ID=sg-1
+      - REGION=Asia
+      - PORT=5001
+      - MONGO_URI=mongodb://sg-mongo:27017
+      - DB_NAME=cdn_storage_sg
+      - PUBLIC_URL=http://localhost:5001
+      - INTERNAL_SECRET=cdn-super-secret-key-2026
+    networks:
+      - cdn-network
+
+  # ==========================================================
+  # SERVER 4: Edge Storage Node - New York (North America)
+  # ==========================================================
+  ny-mongo:
+    image: mongo:7.0
+    container_name: cdn-ny-mongo
+    restart: unless-stopped
+    ports:
+      - "27019:27017"
+    volumes:
+      - ny-mongo-data:/data/db
+    networks:
+      - cdn-network
+
+  server4-storage-ny:
+    build:
+      context: .
+      dockerfile: server4-storage-ny/Dockerfile
+    container_name: cdn-server4-storage-ny
+    restart: unless-stopped
+    depends_on:
+      - ny-mongo
+    ports:
+      - "5002:5002"
+    environment:
+      - NODE_ID=ny-1
+      - REGION=North America
+      - PORT=5002
+      - MONGO_URI=mongodb://ny-mongo:27017
+      - DB_NAME=cdn_storage_ny
+      - PUBLIC_URL=http://localhost:5002
+      - INTERNAL_SECRET=cdn-super-secret-key-2026
+    networks:
+      - cdn-network
+
+  # ==========================================================
+  # SERVER 5: Edge Storage Node - London (Europe)
+  # ==========================================================
+  ldn-mongo:
+    image: mongo:7.0
+    container_name: cdn-ldn-mongo
+    restart: unless-stopped
+    ports:
+      - "27020:27017"
+    volumes:
+      - ldn-mongo-data:/data/db
+    networks:
+      - cdn-network
+
+  server5-storage-ldn:
+    build:
+      context: .
+      dockerfile: server5-storage-ldn/Dockerfile
+    container_name: cdn-server5-storage-ldn
+    restart: unless-stopped
+    depends_on:
+      - ldn-mongo
+    ports:
+      - "5003:5003"
+    environment:
+      - NODE_ID=ldn-1
+      - REGION=Europe
+      - PORT=5003
+      - MONGO_URI=mongodb://ldn-mongo:27017
+      - DB_NAME=cdn_storage_ldn
+      - PUBLIC_URL=http://localhost:5003
+      - INTERNAL_SECRET=cdn-super-secret-key-2026
+    networks:
+      - cdn-network
+
+networks:
+  cdn-network:
+    driver: bridge
+
+volumes:
+  central-mongo-data:
+  sg-mongo-data:
+  ny-mongo-data:
+  ldn-mongo-data:

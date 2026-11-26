@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Go CDN | Geo-Distributed Content Delivery Network</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Navigation -->
+    <header class="navbar">
+      <div class="nav-brand">
+        <div class="logo-icon">⚡</div>
+        <div>
+          <h1>Go CDN Orchestrator</h1>
+          <p class="tagline">5-Server Distributed Architecture (AWS EC2 + MongoDB)</p>
+        </div>
+      </div>
+
+      <!-- Geo Detection & Simulation Widget -->
+      <div class="geo-widget">
+        <div class="geo-pill">
+          <span class="pulsing-dot"></span>
+          <span class="geo-label">Client Location:</span>
+          <strong id="detected-region">Detecting...</strong>
+          <span class="geo-ip" id="client-ip">(IP: --)</span>
+        </div>
+        <div class="region-selector-wrapper">
+          <label for="simulate-region">Simulate Region:</label>
+          <select id="simulate-region">
+            <option value="">Auto-Detect</option>
+            <option value="Asia">Asia (Singapore - sg-1)</option>
+            <option value="North America">North America (New York - ny-1)</option>
+            <option value="Europe">Europe (London - ldn-1)</option>
+          </select>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="main-content">
+      <!-- Status & Topology Cards -->
+      <section class="topology-grid">
+        <div class="topo-card active">
+          <div class="card-header">
+            <span class="badge server-badge">Server 1</span>
+            <span class="status-indicator online"></span>
+          </div>
+          <h3>Web App Portal</h3>
+          <p class="node-meta">Frontend & Geo-Router</p>
+          <div class="node-endpoint">Port: 3000</div>
+        </div>
+
+        <div class="topo-card active">
+          <div class="card-header">
+            <span class="badge server-badge">Server 2</span>
+            <span class="status-indicator online"></span>
+          </div>
+          <h3>Central API & MongoDB</h3>
+          <p class="node-meta">Replication Orchestrator</p>
+          <div class="node-endpoint">Port: 4000</div>
+        </div>
+
+        <div class="topo-card edge" id="card-sg">
+          <div class="card-header">
+            <span class="badge edge-badge">Server 3 (sg-1)</span>
+            <span class="region-flag">🇸🇬 Asia</span>
+          </div>
+          <h3>Singapore Storage</h3>
+          <p class="node-meta">MongoDB GridFS Node</p>
+          <div class="node-endpoint">Port: 5001</div>
+        </div>
+
+        <div class="topo-card edge" id="card-ny">
+          <div class="card-header">
+            <span class="badge edge-badge">Server 4 (ny-1)</span>
+            <span class="region-flag">🇺🇸 North America</span>
+          </div>
+          <h3>New York Storage</h3>
+          <p class="node-meta">MongoDB GridFS Node</p>
+          <div class="node-endpoint">Port: 5002</div>
+        </div>
+
+        <div class="topo-card edge" id="card-ldn">
+          <div class="card-header">
+            <span class="badge edge-badge">Server 5 (ldn-1)</span>
+            <span class="region-flag">🇬🇧 Europe</span>
+          </div>
+          <h3>London Storage</h3>
+          <p class="node-meta">MongoDB GridFS Node</p>
+          <div class="node-endpoint">Port: 5003</div>
+        </div>
+      </section>
+
+      <!-- Upload Section -->
+      <section class="upload-section">
+        <div class="section-title">
+          <h2>Upload File to CDN</h2>
+          <p>Files uploaded to Server 2 are automatically replicated across all 3 storage nodes</p>
+        </div>
+
+        <div class="upload-dropzone" id="dropzone">
+          <input type="file" id="file-input" style="display: none;" accept="image/*,video/*,application/*">
+          <div class="dropzone-content">
+            <div class="upload-icon">📁</div>
+            <p class="dropzone-title">Drag & drop your file here, or <button type="button" class="btn-link" id="browse-btn">Browse Files</button></p>
+            <p class="dropzone-hint">Supports images, banner graphics, documents, and media up to 150MB</p>
+          </div>
+        </div>
+
+        <div class="upload-preview-bar" id="preview-bar" style="display: none;">
+          <div class="file-info-preview">
+            <span class="file-name" id="preview-filename">banner.png</span>
+            <span class="file-size" id="preview-size">245 KB</span>
+          </div>
+          <button class="btn btn-primary" id="start-upload-btn">
+            <span>🚀 Upload & Replicate</span>
+          </button>
+        </div>
+
+        <div class="progress-container" id="progress-container" style="display: none;">
+          <div class="progress-bar" id="progress-bar"></div>
+          <span class="progress-text" id="progress-text">Uploading to Central API...</span>
+        </div>
+      </section>
+
+      <!-- Files Management Section -->
+      <section class="files-section">
+        <div class="files-header">
+          <div>
+            <h2>Replicated CDN Files</h2>
+            <p>Real-time replication status across Singapore, New York, and London</p>
+          </div>
+          <button class="btn btn-secondary" id="refresh-btn">🔄 Refresh</button>
+        </div>
+
+        <div class="files-table-container">
+          <table class="files-table">
+            <thead>
+              <tr>
+                <th>File / ID</th>
+                <th>Size</th>
+                <th>Primary URL Forward</th>
+                <th>Replication Nodes (sg-1, ny-1, ldn-1)</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="files-tbody">
+              <tr>
+                <td colspan="5" class="empty-state">Loading CDN files...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- Modal for JSON Inspection -->
+    <div class="modal-overlay" id="json-modal" style="display: none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>MongoDB Document (Central API Schema)</h3>
+          <button class="btn-close" id="close-modal-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">This JSON represents the exact document stored in Server 2's MongoDB with all edge replicas and forward URLs.</p>
+          <pre><code id="json-code" class="language-json">{}</code></pre>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="copy-json-btn">📋 Copy JSON</button>
+          <button class="btn btn-primary" id="close-modal-footer-btn">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
