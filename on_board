@@ -3,7 +3,8 @@
 # Script: on_board
 # Purpose: Dynamic worker node onboarding CLI for Distributed Go CDN
 # Usage:
-#   ./on_board addnode ip=198.45.98.44 region=Asia [port=5001] [node_id=sg-2]
+#   ./on_board addnode ip=198.45.98.44 [region=Asia] [node_id=sg-2] [port=5001]
+#   (Region and Node ID are OPTIONAL - auto-detected from the worker server!)
 #   ./on_board listnodes
 #   ./on_board removenode node_id=sg-2
 # ==============================================================================
@@ -35,12 +36,12 @@ fi
 print_usage() {
     echo -e "${BOLD}Go CDN Worker Node Onboarding CLI${NC}"
     echo -e "Usage:"
-    echo -e "  ${GREEN}./on_board addnode ip=<ip> region=<region> [port=<port>] [node_id=<id>]${NC}"
+    echo -e "  ${GREEN}./on_board addnode ip=<ip> [region=<region>] [node_id=<id>] [port=<port>]${NC}"
     echo -e "  ${GREEN}./on_board listnodes${NC}"
     echo -e "  ${GREEN}./on_board removenode node_id=<id>${NC}"
-    echo -e "\nExamples:"
-    echo -e "  ./on_board addnode ip=198.45.98.44 region=Asia"
-    echo -e "  ./on_board addnode ip=54.210.12.33 region='North America' port=5002 node_id=ny-2"
+    echo -e "\nExamples (Region and Node ID are optional):"
+    echo -e "  ./on_board addnode ip=198.45.98.44"
+    echo -e "  ./on_board addnode ip=54.210.12.33 region='North America'"
     echo -e "  ./on_board listnodes"
     exit 1
 }
@@ -77,18 +78,23 @@ cmd_addnode() {
                 internal_url="${arg#internal_url=}"
                 ;;
             *)
-                echo -e "${YELLOW}Warning: Unknown argument '$arg' ignored.${NC}"
+                # If someone passed raw IP: ./on_board addnode 198.45.98.44
+                if [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    ip="$arg"
+                else
+                    echo -e "${YELLOW}Warning: Unknown argument '$arg' ignored.${NC}"
+                fi
                 ;;
         esac
     done
 
-    if [ -z "$ip" ] || [ -z "$region" ]; then
-        echo -e "${RED}[ERROR] Both 'ip' and 'region' are required.${NC}"
-        echo -e "Example: ${GREEN}./on_board addnode ip=198.45.98.44 region=Asia${NC}"
+    if [ -z "$ip" ]; then
+        echo -e "${RED}[ERROR] 'ip' is required.${NC}"
+        echo -e "Example: ${GREEN}./on_board addnode ip=198.45.98.44${NC}"
         exit 1
     fi
 
-    # Determine default URLs if not provided
+    # Determine default URLs
     if [ -z "$public_url" ]; then
         public_url="http://${ip}:${port}"
     fi
@@ -96,19 +102,61 @@ cmd_addnode() {
         internal_url="$public_url"
     fi
 
-    # Auto-generate node_id if omitted
-    if [ -z "$node_id" ]; then
-        local lower_region
-        lower_region=$(echo "$region" | tr '[:upper:]' '[:lower:]')
-        if [[ "$lower_region" == *"asia"* ]] || [[ "$lower_region" == *"sg"* ]]; then
-            node_id="sg-$(date +%s | tail -c 4)"
-        elif [[ "$lower_region" == *"america"* ]] || [[ "$lower_region" == *"ny"* ]] || [[ "$lower_region" == *"us"* ]]; then
-            node_id="ny-$(date +%s | tail -c 4)"
-        elif [[ "$lower_region" == *"euro"* ]] || [[ "$lower_region" == *"ldn"* ]] || [[ "$lower_region" == *"uk"* ]]; then
-            node_id="ldn-$(date +%s | tail -c 4)"
-        else
-            node_id="edge-$(date +%s | tail -c 4)"
+    # Auto-detect region & node_id by querying worker's /health if blank
+    if [ -z "$region" ] || [ -z "$node_id" ]; then
+        echo -e "Connecting to worker server at ${CYAN}${public_url}/health${NC} to fetch configuration..."
+        health_resp=$(curl -s --connect-timeout 3 "${internal_url}/health" 2>/dev/null || echo "")
+
+        if [ -n "$health_resp" ]; then
+            if [ -z "$node_id" ]; then
+                detected_node_id=$(echo "$health_resp" | grep -o '"node_id": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+                if [ -n "$detected_node_id" ]; then
+                    node_id="$detected_node_id"
+                    echo -e "Retrieved Node ID from worker ➔ ${CYAN}${node_id}${NC}"
+                fi
+            fi
+            if [ -z "$region" ]; then
+                detected_region=$(echo "$health_resp" | grep -o '"region": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+                if [ -n "$detected_region" ]; then
+                    region="$detected_region"
+                    echo -e "Retrieved Region from worker ➔ ${GREEN}${region}${NC}"
+                fi
+            fi
         fi
+    fi
+
+    # Fallback region detection via IP Geolocation if still blank
+    if [ -z "$region" ]; then
+        echo -e "Auto-detecting region from IP ${ip}..."
+        geo_info=$(curl -s --connect-timeout 2 "https://ip-api.com/json/${ip}?fields=continent,country" 2>/dev/null || true)
+        if [[ "$geo_info" == *"North America"* ]] || [[ "$geo_info" == *"United States"* ]]; then
+            region="North America"
+        elif [[ "$geo_info" == *"Europe"* ]]; then
+            region="Europe"
+        elif [[ "$geo_info" == *"Asia"* ]] || [[ "$geo_info" == *"Singapore"* ]]; then
+            region="Asia"
+        elif [[ "$geo_info" == *"Oceania"* ]] || [[ "$geo_info" == *"Australia"* ]]; then
+            region="Oceania"
+        else
+            region="Asia"
+        fi
+        echo -e "Assigned Region ➔ ${GREEN}${region}${NC}"
+    fi
+
+    # Fallback node_id generation if still blank
+    if [ -z "$node_id" ]; then
+        local lower_reg
+        lower_reg=$(echo "$region" | tr '[:upper:]' '[:lower:]')
+        local pfx="edge"
+        if [[ "$lower_reg" == *"asia"* ]] || [[ "$lower_reg" == *"sg"* ]]; then pfx="sg"; fi
+        if [[ "$lower_reg" == *"america"* ]] || [[ "$lower_reg" == *"ny"* ]]; then pfx="ny"; fi
+        if [[ "$lower_reg" == *"euro"* ]] || [[ "$lower_reg" == *"ldn"* ]]; then pfx="ldn"; fi
+        if [[ "$lower_reg" == *"oceania"* ]] || [[ "$lower_reg" == *"aus"* ]]; then pfx="syd"; fi
+
+        ip_last=$(echo "$ip" | awk -F. '{print $3$4}' | tr -cd '0-9' | head -c 4)
+        if [ -z "$ip_last" ]; then ip_last=$(date +%s | tail -c 4); fi
+        node_id="${pfx}-${ip_last}"
+        echo -e "Assigned Node ID ➔ ${CYAN}${node_id}${NC}"
     fi
 
     echo -e "${BLUE}=====================================================${NC}"
@@ -148,22 +196,19 @@ EOF
         echo -e "${GREEN}✔ Successfully registered in Central API & MongoDB (cdn_central.nodes)!${NC}"
         echo -e "${GREEN}✔ Zero-downtime replication active for new uploads!${NC}"
     else
-        echo -e "${YELLOW}Notice: Central API returned code $http_code ($response_body).${NC}"
-        echo -e "${YELLOW}(If Central API is currently starting or offline, node will be loaded from .env upon boot).${NC}"
+        echo -e "${YELLOW}Notice: Central API response: $http_code ($response_body).${NC}"
     fi
 
     # 2. Write / Append to .env for persistence
     local upper_id
     upper_id=$(echo "$node_id" | tr '[:lower:]-' '[:upper:]_')
     
-    # Target .env file
     local target_env="${ENV_FILE:-server2-central-api/.env}"
     if [ ! -f "$target_env" ] && [ -f "server2-central-api/.env.example" ]; then
         cp server2-central-api/.env.example "$target_env"
     fi
 
     if [ -f "$target_env" ]; then
-        # Append node to .env
         {
             echo ""
             echo "# Worker Node [${node_id}] added by on_board on $(date -u +"%Y-%m-%d %H:%M:%SZ")"
@@ -171,15 +216,11 @@ EOF
             echo "EDGE_${upper_id}_URL=${public_url}"
         } >> "$target_env"
         echo -e "${GREEN}✔ Saved node configuration to: ${CYAN}${target_env}${NC}"
-    else
-        echo -e "${YELLOW}Note: No .env file found to append to. (Created at ${target_env})${NC}"
-        echo "EDGE_${upper_id}_HOST=${ip}:${port}" >> "$target_env"
-        echo "EDGE_${upper_id}_URL=${public_url}" >> "$target_env"
     fi
 
     echo -e "\n${BLUE}=====================================================${NC}"
     echo -e "${GREEN}🎉 Worker node [${node_id}] onboarded successfully!${NC}"
-    echo -e "Users in '${region}' will now be routed to this server."
+    echo -e "Users in region '${region}' will now be routed to this server."
     echo -e "${BLUE}=====================================================${NC}\n"
 }
 
@@ -201,7 +242,6 @@ cmd_listnodes() {
     printf "%-12s | %-16s | %-24s | %-8s\n" "NODE ID" "REGION" "PUBLIC URL" "STATUS"
     echo -e "----------------------------------------------------------------------------------"
 
-    # Use python or jq or basic awk to parse json
     if command -v jq >/dev/null 2>&1; then
         echo "$res" | jq -r '.[] | "\(.node_id) | \(.region) | \(.public_url) | \(.status // "active")"' | while IFS="|" read -r nid reg purl stat; do
             printf "%-12s | %-16s | %-24s | %-8s\n" "$nid" "$reg" "$purl" "$stat"

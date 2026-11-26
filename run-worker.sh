@@ -3,7 +3,8 @@
 # Script: run-worker.sh
 # Purpose: 1-Click Launch Script for a New CDN Storage Worker on AWS EC2
 # Usage:
-#   ./run-worker.sh node_id=syd-1 region=Australia [port=5001] [public_url=...]
+#   ./run-worker.sh [node_id=syd-1] [region=Australia] [port=5001]
+#   (Can be run with NO arguments! Region and Node ID will be auto-detected)
 # ==============================================================================
 
 set -euo pipefail
@@ -42,25 +43,13 @@ for arg in "$@"; do
     esac
 done
 
-if [ -z "$node_id" ] || [ -z "$region" ]; then
-    echo -e "${BOLD}1-Click CDN Worker Node Launcher${NC}"
-    echo -e "Usage:"
-    echo -e "  ${GREEN}./run-worker.sh node_id=<id> region=<region> [port=5001]${NC}"
-    echo -e "\nExample:"
-    echo -e "  ./run-worker.sh node_id=syd-1 region=Australia"
-    echo -e "  ./run-worker.sh node_id=tok-1 region=Asia port=5001"
-    exit 1
-fi
-
 echo -e "${BLUE}=====================================================${NC}"
-echo -e "${BOLD}Launching CDN Worker Node: ${CYAN}${node_id}${NC}"
-echo -e "  - Region: ${GREEN}${region}${NC}"
-echo -e "  - Port:   ${GREEN}${port}${NC}"
+echo -e "${BOLD}         1-Click CDN Storage Worker Launcher          ${NC}"
 echo -e "${BLUE}=====================================================${NC}"
 
-# Auto-detect Public IP if public_url is not set
+# 1. Auto-detect Public IP if public_url is not set
 if [ -z "$public_url" ]; then
-    echo -e "Auto-detecting public IP for this EC2 instance..."
+    echo -e "Detecting public IP for this machine..."
     detected_ip=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
     if [ -z "$detected_ip" ]; then
         detected_ip=$(curl -s --connect-timeout 3 https://ifconfig.me 2>/dev/null || true)
@@ -71,11 +60,72 @@ if [ -z "$public_url" ]; then
     public_url="http://${detected_ip}:${port}"
     echo -e "Detected IP: ${CYAN}${detected_ip}${NC} (Public URL: ${public_url})"
 else
-    # Extract IP from public_url if provided
     detected_ip=$(echo "$public_url" | sed -e 's|^[^/]*//||' -e 's|:.*$||' -e 's|/.*$||')
 fi
 
-# 1. Create or overwrite worker-node/.env
+# 2. Auto-detect Region if blank
+if [ -z "$region" ]; then
+    echo -e "Auto-detecting geographic region..."
+    aws_region=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+    if [ -n "$aws_region" ]; then
+        case "$aws_region" in
+            ap-*) region="Asia" ;;
+            us-*|ca-*) region="North America" ;;
+            eu-*) region="Europe" ;;
+            sa-*) region="South America" ;;
+            af-*) region="Africa" ;;
+            me-*) region="Middle East" ;;
+            *) region="Asia" ;;
+        esac
+        echo -e "Detected AWS Region (${aws_region}) ➔ ${GREEN}${region}${NC}"
+    else
+        # Try IP geolocation API
+        geo_continent=$(curl -s --connect-timeout 2 "https://ip-api.com/json/${detected_ip}?fields=continent,country" 2>/dev/null || true)
+        if [[ "$geo_continent" == *"North America"* ]] || [[ "$geo_continent" == *"United States"* ]]; then
+            region="North America"
+        elif [[ "$geo_continent" == *"Europe"* ]]; then
+            region="Europe"
+        elif [[ "$geo_continent" == *"Asia"* ]] || [[ "$geo_continent" == *"Singapore"* ]] || [[ "$geo_continent" == *"Japan"* ]]; then
+            region="Asia"
+        elif [[ "$geo_continent" == *"Oceania"* ]] || [[ "$geo_continent" == *"Australia"* ]]; then
+            region="Oceania"
+        else
+            region="Asia"
+        fi
+        echo -e "Detected via IP Geolocation ➔ ${GREEN}${region}${NC}"
+    fi
+fi
+
+# 3. Auto-generate node_id if blank
+if [ -z "$node_id" ]; then
+    lower_region=$(echo "$region" | tr '[:upper:]' '[:lower:]')
+    local_prefix="edge"
+    if [[ "$lower_region" == *"asia"* ]] || [[ "$lower_region" == *"sg"* ]]; then
+        local_prefix="sg"
+    elif [[ "$lower_region" == *"america"* ]] || [[ "$lower_region" == *"ny"* ]] || [[ "$lower_region" == *"us"* ]]; then
+        local_prefix="ny"
+    elif [[ "$lower_region" == *"euro"* ]] || [[ "$lower_region" == *"ldn"* ]]; then
+        local_prefix="ldn"
+    elif [[ "$lower_region" == *"oceania"* ]] || [[ "$lower_region" == *"aus"* ]]; then
+        local_prefix="syd"
+    fi
+    # Use last octet of IP or short hash
+    ip_suffix=$(echo "$detected_ip" | awk -F. '{print $3$4}' | tr -cd '0-9' | head -c 4)
+    if [ -z "$ip_suffix" ]; then
+        ip_suffix=$(date +%s | tail -c 4)
+    fi
+    node_id="${local_prefix}-${ip_suffix}"
+    echo -e "Auto-assigned Node ID ➔ ${CYAN}${node_id}${NC}"
+fi
+
+echo -e "${BLUE}=====================================================${NC}"
+echo -e "${BOLD}Configuring Node: ${CYAN}${node_id}${NC}"
+echo -e "  - Region: ${GREEN}${region}${NC}"
+echo -e "  - Port:   ${GREEN}${port}${NC}"
+echo -e "  - URL:    ${CYAN}${public_url}${NC}"
+echo -e "${BLUE}=====================================================${NC}"
+
+# 4. Create worker-node/.env
 mkdir -p worker-node
 cat > worker-node/.env <<EOF
 # Generated by run-worker.sh on $(date -u +"%Y-%m-%d %H:%M:%SZ")
@@ -90,7 +140,7 @@ EOF
 
 echo -e "${GREEN}✔ Configured worker-node/.env${NC}"
 
-# 2. Build and launch with Docker Compose
+# 5. Build and launch with Docker Compose
 echo -e "${BLUE}Starting MongoDB and Worker Storage Agent in Docker...${NC}"
 (
     cd worker-node
@@ -103,5 +153,5 @@ echo -e "  - Health Check: ${CYAN}${public_url}/health${NC}"
 echo -e "${BLUE}=====================================================${NC}"
 echo -e "${YELLOW}${BOLD}👉 Next Step (Onboard this node on Server 2):${NC}"
 echo -e "SSH into ${BOLD}Server 2 (Central API)${NC} and run:"
-echo -e "  ${GREEN}./on_board addnode ip=${detected_ip} region=\"${region}\" node_id=${node_id} port=${port}${NC}"
+echo -e "  ${GREEN}./on_board addnode ip=${detected_ip}${NC}"
 echo -e "${BLUE}=====================================================${NC}\n"
