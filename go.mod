@@ -1,6 +1,6 @@
 module mission1_cdn
 
-go 1.26.2
+go 1.22.0
 
 require go.mongodb.org/mongo-driver v1.17.10
 
