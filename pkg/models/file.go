@@ -38,11 +38,14 @@ type FileDocument struct {
 	Replicas    []ReplicaNode      `bson:"replicas" json:"replicas"`
 }
 
-// NodeConfig represents an edge node definition in configuration.
+// NodeConfig represents an edge node definition in configuration and database registry.
 type NodeConfig struct {
-	NodeID      string `json:"node_id"`
-	Region      string `json:"region"`
-	Host        string `json:"host"`                   // Public or internal host
-	PublicURL   string `json:"public_url"`             // Public URL for clients e.g. http://198.45.98.44:5001
-	InternalURL string `json:"internal_url,omitempty"` // Internal replication URL for Server 2 (e.g. http://server3-storage-sg:5001)
+	ID          primitive.ObjectID `bson:"_id,omitempty" json:"_id,omitempty"`
+	NodeID      string             `bson:"node_id" json:"node_id"`
+	Region      string             `bson:"region" json:"region"`
+	Host        string             `bson:"host" json:"host"`                             // Public or internal host
+	PublicURL   string             `bson:"public_url" json:"public_url"`                 // Public URL for clients e.g. http://198.45.98.44:5001
+	InternalURL string             `bson:"internal_url,omitempty" json:"internal_url,omitempty"` // Internal replication URL for Server 2
+	Status      string             `bson:"status,omitempty" json:"status,omitempty"`     // "active", "offline"
+	CreatedAt   time.Time          `bson:"created_at,omitempty" json:"created_at,omitempty"`
 }

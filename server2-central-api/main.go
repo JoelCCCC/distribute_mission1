@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -88,8 +89,10 @@ func parseNodesConfig() []models.NodeConfig {
 
 type CentralServer struct {
 	cfg        Config
+	mu         sync.RWMutex
 	store      *storage.GridFSStore
 	filesColl  *mongo.Collection
+	nodesColl  *mongo.Collection
 	replicator *replicator.Replicator
 	mux        *http.ServeMux
 }
@@ -132,12 +135,36 @@ func main() {
 		Options: options.Index().SetUnique(true),
 	})
 
+	nodesColl := store.DB.Collection("nodes")
+	_, _ = nodesColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "node_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+
+	// Load existing nodes from MongoDB or seed defaults
+	cursor, err := nodesColl.Find(ctx, bson.M{})
+	if err == nil {
+		var dbNodes []models.NodeConfig
+		if err := cursor.All(ctx, &dbNodes); err == nil && len(dbNodes) > 0 {
+			cfg.Nodes = dbNodes
+			log.Printf("Loaded %d active edge nodes from MongoDB registry", len(dbNodes))
+		} else {
+			for i := range cfg.Nodes {
+				cfg.Nodes[i].Status = "active"
+				cfg.Nodes[i].CreatedAt = time.Now().UTC()
+				_, _ = nodesColl.InsertOne(ctx, cfg.Nodes[i])
+			}
+			log.Printf("Seeded %d default edge nodes into MongoDB registry", len(cfg.Nodes))
+		}
+	}
+
 	rep := replicator.NewReplicator(store, filesColl, cfg.InternalSecret)
 
 	server := &CentralServer{
 		cfg:        cfg,
 		store:      store,
 		filesColl:  filesColl,
+		nodesColl:  nodesColl,
 		replicator: rep,
 		mux:        http.NewServeMux(),
 	}
@@ -173,6 +200,14 @@ func (s *CentralServer) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *CentralServer) getNodes() []models.NodeConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	nodesCopy := make([]models.NodeConfig, len(s.cfg.Nodes))
+	copy(nodesCopy, s.cfg.Nodes)
+	return nodesCopy
+}
+
 func (s *CentralServer) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/files/upload", s.handleUpload)
@@ -180,6 +215,11 @@ func (s *CentralServer) routes() {
 	s.mux.HandleFunc("GET /api/files/{file_id}", s.handleGetFile)
 	s.mux.HandleFunc("GET /api/files/{file_id}/route", s.handleRouteFile)
 	s.mux.HandleFunc("DELETE /api/files/{file_id}", s.handleDeleteFile)
+
+	// Dynamic Node Onboarding & Registry
+	s.mux.HandleFunc("POST /api/nodes", s.handleOnboardNode)
+	s.mux.HandleFunc("GET /api/nodes", s.handleListNodes)
+	s.mux.HandleFunc("DELETE /api/nodes/{node_id}", s.handleRemoveNode)
 }
 
 func (s *CentralServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -191,12 +231,14 @@ func (s *CentralServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		mongoOK = false
 	}
 
+	currentNodes := s.getNodes()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"service":         "central-api",
 		"status":          "healthy",
 		"mongo_connected": mongoOK,
-		"edge_nodes":      len(s.cfg.Nodes),
+		"edge_nodes":      len(currentNodes),
 		"timestamp":       time.Now().UTC(),
 	})
 }
@@ -253,7 +295,8 @@ func (s *CentralServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	var replicas []models.ReplicaNode
 	var primaryURLForward string
 
-	for _, node := range s.cfg.Nodes {
+	nodes := s.getNodes()
+	for _, node := range nodes {
 		url := fmt.Sprintf("%s/files/%s/%s", node.PublicURL, fileID, filename)
 		repNode := models.ReplicaNode{
 			NodeID: node.NodeID,
@@ -289,7 +332,7 @@ func (s *CentralServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Asynchronously dispatch background replication to all edge nodes
-	s.replicator.DispatchAsync(&fileDoc, s.cfg.Nodes)
+	s.replicator.DispatchAsync(&fileDoc, nodes)
 
 	// 5. Return immediate success response to user
 	w.Header().Set("Content-Type", "application/json")
@@ -423,11 +466,237 @@ func (s *CentralServer) handleDeleteFile(w http.ResponseWriter, r *http.Request)
 	_ = s.store.Delete(ctx, fileID)
 
 	// 3. Cascade delete across all edge nodes
-	s.replicator.CascadeDelete(fileID, s.cfg.Nodes)
+	s.replicator.CascadeDelete(fileID, s.getNodes())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "deleted",
 		"file_id": fileID,
+	})
+}
+
+// OnboardNodeRequest represents payload to register a new edge storage node.
+type OnboardNodeRequest struct {
+	NodeID          string `json:"node_id"`
+	Region          string `json:"region"`
+	IP              string `json:"ip"`
+	Port            string `json:"port"`
+	Host            string `json:"host"`
+	PublicURL       string `json:"public_url"`
+	InternalURL     string `json:"internal_url"`
+	SkipHealthCheck bool   `json:"skip_health_check"`
+}
+
+func (s *CentralServer) handleOnboardNode(w http.ResponseWriter, r *http.Request) {
+	var req OnboardNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.Region == "" {
+		http.Error(w, "'region' is required (e.g. Asia, Europe, North America)", http.StatusBadRequest)
+		return
+	}
+	if req.IP == "" && req.Host == "" && req.PublicURL == "" {
+		http.Error(w, "'ip' or 'host' or 'public_url' is required", http.StatusBadRequest)
+		return
+	}
+
+	port := req.Port
+	if port == "" {
+		port = "5001"
+	}
+
+	host := req.Host
+	if host == "" {
+		if req.IP != "" {
+			host = fmt.Sprintf("%s:%s", req.IP, port)
+		} else {
+			host = "localhost:" + port
+		}
+	}
+
+	publicURL := req.PublicURL
+	if publicURL == "" {
+		publicURL = fmt.Sprintf("http://%s", host)
+	}
+
+	internalURL := req.InternalURL
+	if internalURL == "" {
+		internalURL = publicURL
+	}
+
+	nodeID := req.NodeID
+	if nodeID == "" {
+		regionPrefix := strings.ToLower(req.Region)
+		switch {
+		case strings.Contains(regionPrefix, "asia") || strings.Contains(regionPrefix, "sg"):
+			regionPrefix = "sg"
+		case strings.Contains(regionPrefix, "america") || strings.Contains(regionPrefix, "us") || strings.Contains(regionPrefix, "ny"):
+			regionPrefix = "ny"
+		case strings.Contains(regionPrefix, "euro") || strings.Contains(regionPrefix, "ldn"):
+			regionPrefix = "ldn"
+		default:
+			regionPrefix = "edge"
+		}
+		nodeID = fmt.Sprintf("%s-%d", regionPrefix, time.Now().Unix()%1000)
+	}
+
+	// Health probe (optional check)
+	if !req.SkipHealthCheck {
+		probeURL := fmt.Sprintf("%s/health", internalURL)
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get(probeURL)
+		if err != nil {
+			log.Printf("[CentralAPI] Warning: Onboarding node %s at %s failed health probe: %v", nodeID, probeURL, err)
+		} else {
+			_ = resp.Body.Close()
+		}
+	}
+
+	now := time.Now().UTC()
+	newNode := models.NodeConfig{
+		NodeID:      nodeID,
+		Region:      req.Region,
+		Host:        host,
+		PublicURL:   publicURL,
+		InternalURL: internalURL,
+		Status:      "active",
+		CreatedAt:   now,
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// 1. Upsert into MongoDB nodes collection
+	filter := bson.M{"node_id": nodeID}
+	update := bson.M{"$set": newNode}
+	_, err := s.nodesColl.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to save node to mongodb: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Update in-memory node list
+	s.mu.Lock()
+	found := false
+	for i, n := range s.cfg.Nodes {
+		if n.NodeID == nodeID {
+			s.cfg.Nodes[i] = newNode
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.cfg.Nodes = append(s.cfg.Nodes, newNode)
+	}
+	s.mu.Unlock()
+
+	log.Printf("[CentralAPI] Successfully onboarded worker node [%s] in region [%s] (%s)", nodeID, req.Region, publicURL)
+
+	// 3. Auto-backfill existing files to the new node in the background
+	go s.backfillFilesToNode(newNode)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":     "onboarded",
+		"node":       newNode,
+		"message":    fmt.Sprintf("Worker node %s successfully registered in region %s", nodeID, req.Region),
+		"persisted":  "mongodb://cdn_central.nodes",
+		"timestamp":  now,
+	})
+}
+
+func (s *CentralServer) backfillFilesToNode(node models.NodeConfig) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	cursor, err := s.filesColl.Find(ctx, bson.M{})
+	if err != nil {
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var files []models.FileDocument
+	if err := cursor.All(ctx, &files); err != nil {
+		return
+	}
+
+	log.Printf("[CentralAPI] Backfilling %d existing files to new node [%s]...", len(files), node.NodeID)
+	for _, fileDoc := range files {
+		replicaURL := fmt.Sprintf("%s/files/%s/%s", node.PublicURL, fileDoc.FileID, fileDoc.Filename)
+		newReplica := models.ReplicaNode{
+			NodeID: node.NodeID,
+			Region: node.Region,
+			Host:   node.Host,
+			URL:    replicaURL,
+			Status: models.StatusSyncing,
+		}
+
+		filter := bson.M{
+			"file_id": fileDoc.FileID,
+			"replicas.node_id": bson.M{"$ne": node.NodeID},
+		}
+		update := bson.M{
+			"$push": bson.M{"replicas": newReplica},
+		}
+		_, _ = s.filesColl.UpdateOne(ctx, filter, update)
+
+		// Stream file payload to new node
+		s.replicator.ReplicateToSingleNode(&fileDoc, node)
+	}
+}
+
+func (s *CentralServer) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	cursor, err := s.nodesColl.Find(ctx, bson.M{})
+	var nodes []models.NodeConfig
+	if err == nil {
+		_ = cursor.All(ctx, &nodes)
+	}
+	if len(nodes) == 0 {
+		nodes = s.getNodes()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nodes)
+}
+
+func (s *CentralServer) handleRemoveNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("node_id")
+	if nodeID == "" {
+		http.Error(w, "missing node_id", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	_, err := s.nodesColl.DeleteOne(ctx, bson.M{"node_id": nodeID})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	s.mu.Lock()
+	var updated []models.NodeConfig
+	for _, n := range s.cfg.Nodes {
+		if n.NodeID != nodeID {
+			updated = append(updated, n)
+		}
+	}
+	s.cfg.Nodes = updated
+	s.mu.Unlock()
+
+	log.Printf("[CentralAPI] Removed node [%s] from registry", nodeID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":  "removed",
+		"node_id": nodeID,
 	})
 }

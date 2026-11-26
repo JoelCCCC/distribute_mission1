@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Script: on_board
+# Purpose: Dynamic worker node onboarding CLI for Distributed Go CDN
+# Usage:
+#   ./on_board addnode ip=198.45.98.44 region=Asia [port=5001] [node_id=sg-2]
+#   ./on_board listnodes
+#   ./on_board removenode node_id=sg-2
+# ==============================================================================
+
+set -euo pipefail
+
+# Visual Colors
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Central API URL default
+CENTRAL_API_URL="${CENTRAL_API_URL:-http://localhost:4000}"
+
+# Find .env file locations
+ENV_FILE=""
+if [ -f "server2-central-api/.env" ]; then
+    ENV_FILE="server2-central-api/.env"
+elif [ -f ".env" ]; then
+    ENV_FILE=".env"
+elif [ -f "../server2-central-api/.env" ]; then
+    ENV_FILE="../server2-central-api/.env"
+fi
+
+print_usage() {
+    echo -e "${BOLD}Go CDN Worker Node Onboarding CLI${NC}"
+    echo -e "Usage:"
+    echo -e "  ${GREEN}./on_board addnode ip=<ip> region=<region> [port=<port>] [node_id=<id>]${NC}"
+    echo -e "  ${GREEN}./on_board listnodes${NC}"
+    echo -e "  ${GREEN}./on_board removenode node_id=<id>${NC}"
+    echo -e "\nExamples:"
+    echo -e "  ./on_board addnode ip=198.45.98.44 region=Asia"
+    echo -e "  ./on_board addnode ip=54.210.12.33 region='North America' port=5002 node_id=ny-2"
+    echo -e "  ./on_board listnodes"
+    exit 1
+}
+
+# ------------------------------------------------------------------------------
+# 1. ADD NODE
+# ------------------------------------------------------------------------------
+cmd_addnode() {
+    local ip=""
+    local region=""
+    local port="5001"
+    local node_id=""
+    local public_url=""
+    local internal_url=""
+
+    for arg in "$@"; do
+        case "$arg" in
+            ip=*)
+                ip="${arg#ip=}"
+                ;;
+            region=*)
+                region="${arg#region=}"
+                ;;
+            port=*)
+                port="${arg#port=}"
+                ;;
+            node_id=*)
+                node_id="${arg#node_id=}"
+                ;;
+            public_url=*)
+                public_url="${arg#public_url=}"
+                ;;
+            internal_url=*)
+                internal_url="${arg#internal_url=}"
+                ;;
+            *)
+                echo -e "${YELLOW}Warning: Unknown argument '$arg' ignored.${NC}"
+                ;;
+        esac
+    done
+
+    if [ -z "$ip" ] || [ -z "$region" ]; then
+        echo -e "${RED}[ERROR] Both 'ip' and 'region' are required.${NC}"
+        echo -e "Example: ${GREEN}./on_board addnode ip=198.45.98.44 region=Asia${NC}"
+        exit 1
+    fi
+
+    # Determine default URLs if not provided
+    if [ -z "$public_url" ]; then
+        public_url="http://${ip}:${port}"
+    fi
+    if [ -z "$internal_url" ]; then
+        internal_url="$public_url"
+    fi
+
+    # Auto-generate node_id if omitted
+    if [ -z "$node_id" ]; then
+        local lower_region
+        lower_region=$(echo "$region" | tr '[:upper:]' '[:lower:]')
+        if [[ "$lower_region" == *"asia"* ]] || [[ "$lower_region" == *"sg"* ]]; then
+            node_id="sg-$(date +%s | tail -c 4)"
+        elif [[ "$lower_region" == *"america"* ]] || [[ "$lower_region" == *"ny"* ]] || [[ "$lower_region" == *"us"* ]]; then
+            node_id="ny-$(date +%s | tail -c 4)"
+        elif [[ "$lower_region" == *"euro"* ]] || [[ "$lower_region" == *"ldn"* ]] || [[ "$lower_region" == *"uk"* ]]; then
+            node_id="ldn-$(date +%s | tail -c 4)"
+        else
+            node_id="edge-$(date +%s | tail -c 4)"
+        fi
+    fi
+
+    echo -e "${BLUE}=====================================================${NC}"
+    echo -e "${BOLD}Onboarding Worker Node: ${CYAN}${node_id}${NC}"
+    echo -e "  - Region:     ${GREEN}${region}${NC}"
+    echo -e "  - IP / Port:  ${GREEN}${ip}:${port}${NC}"
+    echo -e "  - Public URL: ${CYAN}${public_url}${NC}"
+    echo -e "${BLUE}=====================================================${NC}"
+
+    # Build JSON payload
+    JSON_PAYLOAD=$(cat <<EOF
+{
+  "node_id": "${node_id}",
+  "region": "${region}",
+  "ip": "${ip}",
+  "port": "${port}",
+  "host": "${ip}:${port}",
+  "public_url": "${public_url}",
+  "internal_url": "${internal_url}",
+  "skip_health_check": false
+}
+EOF
+)
+
+    # 1. Send to Central API (Zero Downtime Registration in MongoDB + in-memory)
+    echo -e "Registering with Central API (${CENTRAL_API_URL})..."
+    local http_response
+    local http_code
+    http_response=$(curl -s -w "\n%{http_code}" -X POST "${CENTRAL_API_URL}/api/nodes" \
+        -H "Content-Type: application/json" \
+        -d "$JSON_PAYLOAD" 2>/dev/null || echo -e "\n000")
+
+    http_code=$(echo "$http_response" | tail -n 1)
+    response_body=$(echo "$http_response" | sed '$d')
+
+    if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
+        echo -e "${GREEN}✔ Successfully registered in Central API & MongoDB (cdn_central.nodes)!${NC}"
+        echo -e "${GREEN}✔ Zero-downtime replication active for new uploads!${NC}"
+    else
+        echo -e "${YELLOW}Notice: Central API returned code $http_code ($response_body).${NC}"
+        echo -e "${YELLOW}(If Central API is currently starting or offline, node will be loaded from .env upon boot).${NC}"
+    fi
+
+    # 2. Write / Append to .env for persistence
+    local upper_id
+    upper_id=$(echo "$node_id" | tr '[:lower:]-' '[:upper:]_')
+    
+    # Target .env file
+    local target_env="${ENV_FILE:-server2-central-api/.env}"
+    if [ ! -f "$target_env" ] && [ -f "server2-central-api/.env.example" ]; then
+        cp server2-central-api/.env.example "$target_env"
+    fi
+
+    if [ -f "$target_env" ]; then
+        # Append node to .env
+        {
+            echo ""
+            echo "# Worker Node [${node_id}] added by on_board on $(date -u +"%Y-%m-%d %H:%M:%SZ")"
+            echo "EDGE_${upper_id}_HOST=${ip}:${port}"
+            echo "EDGE_${upper_id}_URL=${public_url}"
+        } >> "$target_env"
+        echo -e "${GREEN}✔ Saved node configuration to: ${CYAN}${target_env}${NC}"
+    else
+        echo -e "${YELLOW}Note: No .env file found to append to. (Created at ${target_env})${NC}"
+        echo "EDGE_${upper_id}_HOST=${ip}:${port}" >> "$target_env"
+        echo "EDGE_${upper_id}_URL=${public_url}" >> "$target_env"
+    fi
+
+    echo -e "\n${BLUE}=====================================================${NC}"
+    echo -e "${GREEN}🎉 Worker node [${node_id}] onboarded successfully!${NC}"
+    echo -e "Users in '${region}' will now be routed to this server."
+    echo -e "${BLUE}=====================================================${NC}\n"
+}
+
+# ------------------------------------------------------------------------------
+# 2. LIST NODES
+# ------------------------------------------------------------------------------
+cmd_listnodes() {
+    echo -e "${BLUE}Querying registered edge nodes from Central API (${CENTRAL_API_URL})...${NC}\n"
+    local res
+    res=$(curl -s "${CENTRAL_API_URL}/api/nodes" 2>/dev/null || echo "[]")
+
+    if [ "$res" = "[]" ] || [ -z "$res" ]; then
+        echo -e "${YELLOW}No active nodes returned from Central API (check if Server 2 is running).${NC}"
+        exit 0
+    fi
+
+    echo -e "${BOLD}Registered CDN Worker Nodes:${NC}"
+    echo -e "----------------------------------------------------------------------------------"
+    printf "%-12s | %-16s | %-24s | %-8s\n" "NODE ID" "REGION" "PUBLIC URL" "STATUS"
+    echo -e "----------------------------------------------------------------------------------"
+
+    # Use python or jq or basic awk to parse json
+    if command -v jq >/dev/null 2>&1; then
+        echo "$res" | jq -r '.[] | "\(.node_id) | \(.region) | \(.public_url) | \(.status // "active")"' | while IFS="|" read -r nid reg purl stat; do
+            printf "%-12s | %-16s | %-24s | %-8s\n" "$nid" "$reg" "$purl" "$stat"
+        done
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import sys, json
+data = json.loads('''$res''')
+for n in data:
+    print(f\"{n.get('node_id',''):<12} | {n.get('region',''):<16} | {n.get('public_url',''):<24} | {n.get('status','active'):<8}\")
+"
+    else
+        echo "$res"
+    fi
+    echo -e "----------------------------------------------------------------------------------\n"
+}
+
+# ------------------------------------------------------------------------------
+# 3. REMOVE NODE
+# ------------------------------------------------------------------------------
+cmd_removenode() {
+    local node_id=""
+    for arg in "$@"; do
+        case "$arg" in
+            node_id=*)
+                node_id="${arg#node_id=}"
+                ;;
+            *)
+                if [ -z "$node_id" ]; then
+                    node_id="$arg"
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$node_id" ]; then
+        echo -e "${RED}[ERROR] node_id is required.${NC}"
+        echo -e "Usage: ${GREEN}./on_board removenode node_id=<id>${NC}"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Removing node [${node_id}] from Central API...${NC}"
+    local res
+    res=$(curl -s -X DELETE "${CENTRAL_API_URL}/api/nodes/${node_id}" 2>/dev/null || echo "")
+    echo -e "${GREEN}✔ Node [${node_id}] successfully decommissioned.${NC}\n"
+}
+
+# Entrypoint router
+ACTION="${1:-}"
+shift || true
+
+case "$ACTION" in
+    addnode)
+        cmd_addnode "$@"
+        ;;
+    listnodes)
+        cmd_listnodes
+        ;;
+    removenode)
+        cmd_removenode "$@"
+        ;;
+    *)
+        print_usage
+        ;;
+esac

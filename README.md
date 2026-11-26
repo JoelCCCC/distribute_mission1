@@ -189,6 +189,31 @@ docker compose up -d --build
 
 ---
 
+## ⚡ Dynamic Worker Node Onboarding (`./on_board`)
+
+You can onboard new worker storage servers dynamically at runtime using the `on_board` command line tool or Central REST API with **zero downtime**:
+
+```bash
+# Onboard a new worker server (saves to MongoDB & appends to .env)
+./on_board addnode ip=198.45.98.44 region=Asia
+
+# Optional custom port and node ID
+./on_board addnode ip=198.45.98.44 region=Asia port=5001 node_id=sg-2
+
+# List all registered worker nodes
+./on_board listnodes
+
+# Remove a worker node
+./on_board removenode node_id=sg-2
+```
+
+### What happens when you onboard a node:
+1. **Zero-Downtime Registration**: The node is registered in Central API and stored in MongoDB (`cdn_central.nodes`). The Central API starts replicating future uploads to it immediately without restarting any Docker containers.
+2. **Auto-Backfill**: Central API automatically streams existing files to the new node in the background so it becomes an active replica right away.
+3. **Persisted in `.env`**: The command appends the node configuration to `.env` on disk for permanent persistence.
+
+---
+
 ## 🧪 Verification & Testing
 
 ### 1. Run Automated Unit & Integration Tests

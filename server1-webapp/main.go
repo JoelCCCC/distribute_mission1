@@ -70,6 +70,7 @@ func (s *WebServer) routes() {
 	s.mux.HandleFunc("GET /api/files", s.handleProxyListFiles)
 	s.mux.HandleFunc("GET /api/files/{file_id}", s.handleProxyGetFile)
 	s.mux.HandleFunc("DELETE /api/files/{file_id}", s.handleProxyDeleteFile)
+	s.mux.HandleFunc("GET /api/nodes", s.handleProxyListNodes)
 
 	// CDN Geo-routing link
 	s.mux.HandleFunc("GET /cdn/{file_id}/{filename}", s.handleCDNRoute)
@@ -155,6 +156,27 @@ func (s *WebServer) handleProxyDeleteFile(w http.ResponseWriter, r *http.Request
 	targetURL := fmt.Sprintf("%s/api/files/%s", s.cfg.CentralAPIURL, fileID)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, targetURL, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to contact central api: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *WebServer) handleProxyListNodes(w http.ResponseWriter, r *http.Request) {
+	targetURL := fmt.Sprintf("%s/api/nodes", s.cfg.CentralAPIURL)
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

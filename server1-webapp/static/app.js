@@ -8,10 +8,27 @@ let pollInterval = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   initGeoDetection();
+  loadDynamicNodes();
   initUploadDropzone();
   initEventListeners();
   loadFiles();
 });
+
+async function loadDynamicNodes() {
+  try {
+    const res = await fetch('/api/nodes');
+    if (res.ok) {
+      const nodes = await res.json();
+      const select = document.getElementById('simulate-region');
+      if (select && nodes && nodes.length > 0) {
+        select.innerHTML = '<option value="">Auto-Detect</option>' +
+          nodes.map(n => `<option value="${n.region}">${n.region} (${n.node_id} - ${n.public_url})</option>`).join('');
+      }
+    }
+  } catch (err) {
+    console.debug('Dynamic nodes fetch error:', err);
+  }
+}
 
 // 1. Geo-Location & Simulation
 async function initGeoDetection() {

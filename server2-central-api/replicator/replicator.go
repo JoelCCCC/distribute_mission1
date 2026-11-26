@@ -47,6 +47,11 @@ func (r *Replicator) DispatchAsync(doc *models.FileDocument, nodes []models.Node
 	}()
 }
 
+// ReplicateToSingleNode replicates a file to a single newly onboarded edge node.
+func (r *Replicator) ReplicateToSingleNode(doc *models.FileDocument, node models.NodeConfig) {
+	go r.replicateToNode(doc, node)
+}
+
 func (r *Replicator) replicateToNode(doc *models.FileDocument, node models.NodeConfig) {
 	log.Printf("[Replicator] Replicating file %s (%s) to node %s (%s) at %s...", doc.FileID, doc.Filename, node.NodeID, node.Region, node.Host)
 
