@@ -1,0 +1,31 @@
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: cdn-worker-mongo
+    restart: unless-stopped
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - worker-mongo-data:/data/db
+
+  worker:
+    build:
+      context: ..
+      dockerfile: worker-node/Dockerfile
+    container_name: cdn-worker-agent
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    ports:
+      - "${PORT:-5001}:${PORT:-5001}"
+    environment:
+      - NODE_ID=${NODE_ID:-worker-1}
+      - REGION=${REGION:-Global}
+      - PORT=${PORT:-5001}
+      - MONGO_URI=mongodb://mongo:27017
+      - DB_NAME=${DB_NAME:-cdn_storage}
+      - PUBLIC_URL=${PUBLIC_URL:-http://localhost:5001}
+      - INTERNAL_SECRET=${INTERNAL_SECRET:-cdn-super-secret-key-2026}
+
+volumes:
+  worker-mongo-data:
