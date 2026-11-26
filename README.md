@@ -107,11 +107,11 @@ open http://localhost:3000
 ---
 
 ### Step 1: Install Docker on all EC2 instances
-Run the automated setup script on each instance:
+Run the automated Ubuntu setup script on each instance:
 ```bash
-git clone https://github.com/<your-username>/mission1_cdn.git
-cd mission1_cdn
-./deploy/ec2/setup-docker.sh
+git clone https://github.com/JoelCCCC/distribute_mission1.git
+cd distribute_mission1
+./install-docker-ubuntu.sh
 newgrp docker
 ```
 
